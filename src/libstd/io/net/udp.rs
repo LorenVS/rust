@@ -104,6 +104,51 @@ impl UdpSocket {
         }
     }
 
+    /// Closes the reading half of this socket.
+    ///
+    /// This method will close the reading portion of this socket, causing
+    /// all pending and future reads to immediately return with an error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #![allow(unused_must_use)]
+    /// use std::io::timer;
+    /// use std::io::net::udp::UdpSocket;
+    ///
+    /// let addr = SocketAddr { ip: Ipv4Addr(0, 0, 0, 0), port: 1 };
+    /// let mut sock = UdpSocket::bind(addr).unwrap();
+    /// let sock2 = sock.clone();
+    ///
+    /// spawn(proc() {
+    ///     // close the reading half of the socket after 1 second
+    ///     timer::sleep(1000);
+    ///     let mut sock = sock2;
+    ///     sock.close_read();
+    /// });
+    ///
+    /// // wait for some data, will get canceled after one second
+    /// let mut buf = [0];
+    /// let _ = sock.recvfrom(buf);
+    /// ```
+    ///
+    /// Note that this method affects all cloned handles associated with this
+    /// socket, not just this one handle.
+    pub fn close_read(&mut self) -> IoResult<()> {
+        self.obj.close_read().map_err(IoError::from_rtio_error)
+    }
+
+    /// Closes the writing half of this socket.
+    ///
+    /// This method will close the writing portion of this socket, causing
+    /// all future writes to immediately return with an error.
+    ///
+    /// Note that this method affects all cloned handles associated with this
+    /// socket, not just this one handle.
+    pub fn close_write(&mut self) -> IoResult<()> {
+        self.obj.close_write().map_err(IoError::from_rtio_error)
+    }
+
     /// Returns the socket address that this socket was created from.
     pub fn socket_name(&mut self) -> IoResult<SocketAddr> {
         match self.obj.socket_name() {
@@ -524,6 +569,59 @@ mod test {
 
         rx.recv();
         serv_rx.recv();
+    })
+
+
+    iotest!(fn close_readwrite_smoke() {
+        let addr = next_test_ip4();
+        let addr2 = next_test_ip4();
+        let server = UdpSocket::bind(addr).unwrap();
+        let client1 = UdpSocket::bind(addr2).unwrap();
+        let client2 = client1.clone();
+        let mut b = [0];
+        
+        // closing should prevent reads/writes
+        client1.close_write().unwrap();
+        assert!(client1.sendto(addr, [0]).is_err());
+        client1.close_read().unwrap();
+        assert!(client1.recvfrom(b).is_err());
+
+        // closing should affect previous handles
+        assert!(client2.write(addr, [0]).is_err());
+        assert!(client2.recvfrom(b).is_err());
+
+        // closing should affect new handles
+        let mut client3 = s.clone();
+        assert!(client3.sendto(addr, [0]).is_err());
+        assert!(client3.recvfrom(b).is_err());
+
+        // make sure these don't die
+        let _ = client2.close_read();
+        let _ = client2.close_write();
+        let _ = client3.close_read();
+        let _ = client3.close_write();
+    })
+
+    iotest!(fn close_read_wakes_up() {
+        let addr = next_test_ip4();
+        let addr2 = next_test_ip4();
+        let server = UdpSocket::bind(addr).unwrap();
+        let client1 = UdpSocket::bind(addr2).unwrap();
+        let client2 = client1.clone();
+        let mut b = [0];
+
+        let (tx, rx) = channel();
+        spawn(proc() {
+            let mut client2 = client2;
+            assert!(client2.recvfrom([0]).is_err());
+            tx.send(());
+        });
+        
+        // this should wake up the child task
+        client1.close_read().unwrap();
+
+        // this test will never finish if the child doesn't wake up
+        rx.recv();
     })
 
     iotest!(fn recvfrom_timeout() {
